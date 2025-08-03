@@ -80,7 +80,7 @@ For convenience, we provide pretrained weights for DeCo-Diff (UNet_L). These wei
   Download from [Google Drive](https://drive.google.com/file/d/1bZvzIyuEMWxIo8ZByP9us--OhTTPXYiA/view?usp=sharing) 
 
 
-Also, using pretrained model with imagenet could slightly boost the performance and ribustness. You could download provided pretrained model provided by [LDM repository](https://github.com/CompVis/latent-diffusion?tab=readme-ov-file) from [here!](https://ommer-lab.com/files/latent-diffusion/cin.zip). 
+Also, using pretrained model with imagenet could slightly boost the performance and robustness. You could download provided pretrained model provided by [LDM repository](https://github.com/CompVis/latent-diffusion?tab=readme-ov-file) from [here!](https://ommer-lab.com/files/latent-diffusion/cin.zip). 
 To use the pretrained model, set `--from-scratch` to `False` and specify the path to the downloaded checkpoint using `--pretrained`.
 
 ---
