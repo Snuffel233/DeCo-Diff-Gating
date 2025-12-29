@@ -38,6 +38,40 @@ def convert_module_to_f32(x):
     pass
 
 
+class SkipGate(nn.Module):
+    """
+    轻量级跳跃连接门控模块（Skip-Gating）
+    用于控制 skip connection 中的特征传递，防止异常特征被"抄回" decoder。
+    
+    原理：
+    - 对 skip feature 计算门控值 α = sigmoid(conv1x1(s))
+    - 输出 s' = (1 - α) * s，其中 α 表示"需要改动的程度"
+    - 正常区域 α → 0，保留原始特征
+    - 异常区域 α → 1，抑制原始特征
+    """
+    def __init__(self, channels, dims=2):
+        super().__init__()
+        self.gate_conv = conv_nd(dims, channels, channels, 1)
+    
+    def forward(self, skip_feat, dod_gate=None):
+        """
+        Args:
+            skip_feat: 来自 encoder 的跳跃连接特征
+            dod_gate: 可选的 DoD 门控值，用于联动控制
+        Returns:
+            gated_feat: 门控后的特征
+            alpha: 门控值（可用于可视化）
+        """
+        alpha = th.sigmoid(self.gate_conv(skip_feat))
+        if dod_gate is not None:
+            # 如果有 DoD gate，将其下采样并注入影响
+            if dod_gate.shape[2:] != alpha.shape[2:]:
+                dod_gate = F.interpolate(dod_gate, size=alpha.shape[2:], mode='bilinear', align_corners=False)
+            alpha = alpha * dod_gate
+        gated_feat = (1 - alpha) * skip_feat
+        return gated_feat, alpha
+
+
 ## go
 class AttentionPool2d(nn.Module):
     """
@@ -703,6 +737,36 @@ class UNetModel(nn.Module):
             conv_nd(dims, model_channels, n_embed, 1),
             #nn.LogSoftmax(dim=1)  # change to cross_entropy and produce non-normalized logits
         )
+        
+        # ============== DoD-Gating 门控头 ==============
+        # 输出一个门控值 g = sigmoid(...)，最终 DoD 输出 = g * DoD_raw
+        # 门控会自然学到：对正常区域 g → 0，对异常区域 g → 1
+        self.gate_head = nn.Sequential(
+            normalization(ch),
+            nn.SiLU(),
+            conv_nd(dims, model_channels, out_channels, 3, padding=1),
+            nn.Sigmoid()
+        )
+        
+        # ============== Skip-Gating 跳连门控 ==============
+        # 为每个 skip connection 添加门控，防止异常特征被"抄回" decoder
+        # 需要重新计算 input_block_chans（因为原来是局部变量）
+        self._skip_gate_chans = []
+        temp_ch = model_channels
+        self._skip_gate_chans.append(temp_ch)  # 第一个 input block
+        for level, mult in enumerate(channel_mult):
+            for _ in range(num_res_blocks):
+                temp_ch = mult * model_channels
+                self._skip_gate_chans.append(temp_ch)
+            if level != len(channel_mult) - 1:
+                self._skip_gate_chans.append(temp_ch)
+        
+        self.skip_gates = nn.ModuleList([
+            SkipGate(ch_skip, dims) for ch_skip in self._skip_gate_chans
+        ])
+        
+        # 是否启用门控（可以在推理时关闭以对比效果）
+        self.use_gating = True
 
     def convert_to_fp16(self):
         """
@@ -720,14 +784,16 @@ class UNetModel(nn.Module):
         self.middle_block.apply(convert_module_to_f32)
         self.output_blocks.apply(convert_module_to_f32)
 
-    def forward(self, x, t=None, context=None, y=None,**kwargs):
+    def forward(self, x, t=None, context=None, y=None, return_gate=False, **kwargs):
         """
         Apply the model to an input batch.
         :param x: an [N x C x ...] Tensor of inputs.
         :param t: a 1-D batch of t.
         :param context: conditioning plugged in via crossattn
         :param y: an [N] Tensor of labels, if class-conditional.
+        :param return_gate: if True, also return gate maps for anomaly fusion.
         :return: an [N x C x ...] Tensor of outputs.
+                 If return_gate=True, returns (output, dod_gate, skip_gates)
         """
         assert (y is not None) == (
             self.num_classes is not None
@@ -741,19 +807,50 @@ class UNetModel(nn.Module):
             assert y.shape == (x.shape[0],)
             emb = emb + self.label_emb(y)
 
+        # ============== Encoder ==============
         h = x.type(self.dtype)
         for module in self.input_blocks:
             h = module(h, emb, context)
             hs.append(h)
         h = self.middle_block(h, emb, context)
-        for module in self.output_blocks:
-            h = th.cat([h, hs.pop()], dim=1)
+        
+        # ============== Decoder with Skip-Gating ==============
+        skip_gate_outputs = []
+        for i, module in enumerate(self.output_blocks):
+            skip_feat = hs.pop()
+            
+            if self.use_gating:
+                # 应用 Skip-Gating：抑制可能的异常特征
+                skip_idx = len(self._skip_gate_chans) - 1 - i
+                skip_feat_gated, skip_alpha = self.skip_gates[skip_idx](skip_feat)
+                skip_gate_outputs.append(skip_alpha)
+                h = th.cat([h, skip_feat_gated], dim=1)
+            else:
+                # 不使用门控（用于对比实验）
+                h = th.cat([h, skip_feat], dim=1)
+            
             h = module(h, emb, context)
+        
         h = h.type(x.dtype)
+        
         if self.predict_codebook_ids:
             return self.id_predictor(h)
+        
+        # ============== DoD-Gating ==============
+        dod_raw = self.out(h)  # 原始 DoD 预测
+        
+        if self.use_gating:
+            dod_gate = self.gate_head(h)  # 门控值 g ∈ [0, 1]
+            dod_output = dod_gate * dod_raw  # 门控后的输出
         else:
-            return self.out(h)
+            dod_gate = None
+            dod_output = dod_raw
+        
+        if return_gate:
+            # 返回门控图，用于推理时的异常融合
+            return dod_output, dod_gate, skip_gate_outputs
+        
+        return dod_output
 
 
 class EncoderUNetModel(nn.Module):

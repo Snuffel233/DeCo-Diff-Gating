@@ -121,14 +121,30 @@ def smooth_mask(mask, sigma=1.0):
 
     
 
-def calculate_anomaly_maps(x0_s, encoded_s,  image_samples_s, latent_samples_s, center_size=256):
+def calculate_anomaly_maps(x0_s, encoded_s,  image_samples_s, latent_samples_s, gate_maps_s=None, center_size=256):
+    """
+    计算异常图。
+    
+    Args:
+        x0_s: 原始重建图像列表
+        encoded_s: 编码后的 latent 列表
+        image_samples_s: 采样后的图像列表
+        latent_samples_s: 采样后的 latent 列表
+        gate_maps_s: 可选的门控图列表（来自 DoD-Gating）
+        center_size: 中心裁剪尺寸
+    
+    Returns:
+        包含多种异常图的字典
+    """
     pred_geometric = []
     pred_aritmetic = []
     image_differences = []
     latent_differences = []
     input_images = []
     output_images = []
-    for x, encoded,  image_samples, latent_samples in zip(x0_s, encoded_s,  image_samples_s, latent_samples_s):
+    gate_anomalies = []
+    
+    for idx, (x, encoded,  image_samples, latent_samples) in enumerate(zip(x0_s, encoded_s,  image_samples_s, latent_samples_s)):
             
         input_image = ((np.clip(x[0].detach().cpu().numpy(), -1, 1).transpose(1,2,0))*127.5+127.5).astype(np.uint8)
         output_image = ((np.clip(image_samples[0].detach().cpu().numpy(), -1, 1).transpose(1,2,0))*127.5+127.5).astype(np.uint8)
@@ -151,17 +167,68 @@ def calculate_anomaly_maps(x0_s, encoded_s,  image_samples_s, latent_samples_s, 
         final_anomaly2 = 1/2*image_difference + 1/2*latent_difference
         pred_geometric.append(final_anomaly)
         pred_aritmetic.append(final_anomaly2)
+        
+        # 处理门控图（如果存在）
+        if gate_maps_s is not None and idx < len(gate_maps_s):
+            gate_map = gate_maps_s[idx]
+            if gate_map is not None:
+                # 将门控图处理成异常图格式
+                gate_map_np = gate_map[0].mean(dim=0).detach().cpu().numpy()  # 平均通道
+                gate_map_np = resize(gate_map_np, (center_size, center_size))
+                gate_map_np = smooth_mask(gate_map_np, sigma=2)
+                gate_anomalies.append(gate_map_np)
+            else:
+                gate_anomalies.append(np.zeros((center_size, center_size)))
             
     pred_geometric = np.stack(pred_geometric, axis=0)
     pred_aritmetic = np.stack(pred_aritmetic, axis=0)
     latent_differences = np.stack(latent_differences, axis=0)
     image_differences = np.stack(image_differences, axis=0)
 
-    return {'anomaly_geometric':pred_geometric, 'anomaly_aritmetic':pred_aritmetic, 'latent_discrepancy':latent_differences, 'image_discrepancy':image_differences}
+    result = {
+        'anomaly_geometric': pred_geometric, 
+        'anomaly_aritmetic': pred_aritmetic, 
+        'latent_discrepancy': latent_differences, 
+        'image_discrepancy': image_differences
+    }
+    
+    # 如果有门控图，添加门控融合结果
+    if gate_maps_s is not None and len(gate_anomalies) > 0:
+        gate_anomalies = np.stack(gate_anomalies, axis=0)
+        # 门控加权融合：使用门控图作为权重与几何均值异常图融合
+        gate_fused = 0.6 * pred_geometric + 0.4 * gate_anomalies
+        result['gate_map'] = gate_anomalies
+        result['gate_fused'] = gate_fused
+    
+    return result
 
+
+def extract_gate_maps(model, encoded_batch, t, model_kwargs, device='cuda'):
+    """
+    从模型中提取门控图。
+    
+    Args:
+        model: UNet 模型
+        encoded_batch: 编码后的 latent 批次
+        t: 时间步
+        model_kwargs: 模型参数
+        device: 设备
+    
+    Returns:
+        gate_maps: DoD 门控图列表
+    """
+    with torch.no_grad():
+        # 调用模型并请求返回门控图
+        output = model(encoded_batch, t, return_gate=True, **model_kwargs)
+        if isinstance(output, tuple) and len(output) >= 2:
+            _, dod_gate, skip_gates = output
+            return dod_gate
+        else:
+            return None
 
 
 def evaluate_anomaly_maps(anomaly_maps, segmentation):
+    """评估异常图的各项指标"""
     for key in anomaly_maps.keys():
         auroc_score, aupro_score ,f1_max_score, ap, aurocsp, apsp, f1sp = calculate_metrics(segmentation, anomaly_maps[key])
         auroc_score, aupro_score, f1_max_score, ap, aurocsp, apsp, f1sp, = np.round(auroc_score, 4), np.round(aupro_score, 4), np.round(f1_max_score, 4), np.round(ap, 4), np.round(aurocsp, 4), np.round(apsp, 4), np.round(f1sp, 4)
@@ -223,6 +290,8 @@ def evaluation(args):
             test_dataset = VISADataset('test', object_class=category, rootdir=args.data_dir, transform=transform, normal=False, anomaly_class=args.anomaly_class, image_size=args.image_size, center_size=args.actual_image_size, center_crop=args.center_crop)
         test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False, num_workers=4, drop_last=False)
         
+        gate_maps_s = []  # 用于存储门控图
+        
         for ii, (x, seg, object_cls) in enumerate(test_loader):
             with torch.no_grad():
                 # Map input images to latent space + normalize latents:
@@ -237,6 +306,13 @@ def evaluation(args):
                     model_kwargs=model_kwargs, progress=False, device=device,
                     eta = 0
                 )
+                
+                # 提取门控图（如果启用）
+                if args.use_gate_fusion:
+                    t = torch.zeros(encoded.shape[0], dtype=torch.long, device=device)
+                    gate_map = extract_gate_maps(model, encoded, t, model_kwargs, device)
+                    if gate_map is not None:
+                        gate_maps_s += [gate_map[i:i+1] for i in range(gate_map.shape[0])]
 
                 image_samples = vae.decode(latent_samples / 0.18215).sample 
                 x0 = vae.decode(encoded / 0.18215).sample 
@@ -247,10 +323,17 @@ def evaluation(args):
             latent_samples_s += [_latent_samples.unsqueeze(0) for _latent_samples in latent_samples]
             x0_s += [_x0.unsqueeze(0) for _x0 in x0]
 
-        print(category)        
-        anomaly_maps = calculate_anomaly_maps(x0_s, encoded_s,  image_samples_s, latent_samples_s, center_size=args.center_size)
+        print(category)
+        # 计算异常图（如果启用门控融合，传入门控图）
+        if args.use_gate_fusion and len(gate_maps_s) > 0:
+            anomaly_maps = calculate_anomaly_maps(x0_s, encoded_s, image_samples_s, latent_samples_s, 
+                                                   gate_maps_s=gate_maps_s, center_size=args.center_size)
+        else:
+            anomaly_maps = calculate_anomaly_maps(x0_s, encoded_s, image_samples_s, latent_samples_s, 
+                                                   center_size=args.center_size)
         evaluate_anomaly_maps(anomaly_maps, np.stack(segmentation_s, axis=0))
         print('=='*30)  
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -266,6 +349,8 @@ if __name__ == "__main__":
     parser.add_argument("--model-path", type=str, default='.')
     parser.add_argument("--anomaly-class", type=str, default='all')
     parser.add_argument("--reverse-steps", type=int, default=5)
+    parser.add_argument("--use-gate-fusion", type=lambda v: True if v.lower() in ('yes','true','t','y','1') else False, default=False,
+                        help="是否使用门控图融合进行异常检测（需要使用带 Gating 的模型）")
     
     
     args = parser.parse_args()
