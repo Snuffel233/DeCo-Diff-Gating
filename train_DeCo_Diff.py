@@ -203,9 +203,25 @@ def main(args):
         dataset = MVTECDataset('train', object_class=args.object_category, rootdir=args.data_dir, transform=transform, image_size=args.image_size,  center_size=args.center_size, augment=args.augmentation, center_crop=args.center_crop)
     elif args.dataset=='visa':
         dataset = VISADataset('train', object_class=args.object_category, rootdir=args.data_dir, transform=transform, image_size=args.image_size,  center_size=args.center_size, augment=args.augmentation, center_crop=args.center_crop)
-       
+    
+    # 使用 DistributedSampler 确保多卡训练时数据正确分片
+    sampler = torch.utils.data.distributed.DistributedSampler(
+        dataset, 
+        num_replicas=dist.get_world_size(), 
+        rank=rank,
+        shuffle=True,
+        seed=args.global_seed
+    )
     batch_size = args.global_batch_size // dist.get_world_size()
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=False)
+    loader = DataLoader(
+        dataset, 
+        batch_size=batch_size, 
+        shuffle=False,  # DistributedSampler 会处理 shuffle
+        sampler=sampler,
+        num_workers=4, 
+        drop_last=False,
+        pin_memory=True  # 加速 GPU 数据传输
+    )
     accumulation_steps = args.accumulation_steps
 
         
@@ -232,6 +248,8 @@ def main(args):
     logger.info(f"Training for {args.epochs} epochs...")
     
     for epoch in range(1, args.epochs+1):
+        # 设置 sampler 的 epoch 以确保每个 epoch 数据 shuffle 不同
+        sampler.set_epoch(epoch)
         logger.info(f"Beginning epoch {epoch}...")
         for ii, (x, _, y) in enumerate(loader):
             x = x.to(device)
