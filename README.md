@@ -1,120 +1,185 @@
+# DeCo-Diff-Gating
 
+**基于扩散模型的多类别无监督异常检测**
 
-# ✨ DeCo-Diff ✨
-**A PyTorch Implementation for Multi-Class Unsupervised Anomaly Detection**
+本仓库是 CVPR 2025 论文 [**"Correcting Deviations from Normality: A Reformulated Diffusion Model for Unsupervised Anomaly Detection"**](https://openaccess.thecvf.com/content/CVPR2025/papers/Beizaee_Correcting_Deviations_from_Normality_A_Reformulated_Diffusion_Model_for_Multi-Class_CVPR_2025_paper.pdf) 的 PyTorch 实现。
 
-This repository hosts the official PyTorch implementation for our CVPR 2025 paper:  
-[**"Correcting Deviations from Normality: A Reformulated Diffusion Model for Unsupervised Anomaly Detection"**.](https://openaccess.thecvf.com/content/CVPR2025/papers/Beizaee_Correcting_Deviations_from_Normality_A_Reformulated_Diffusion_Model_for_Multi-Class_CVPR_2025_paper.pdf)
-
----
-
-## 🎨 Approach
-
-
-![DeCo-Diff](./assets/DeCo-for-UAD.png)
+本分支额外添加了 **门控机制 (DoD-Gating & Skip-Gating)**、**多卡训练/推理支持** 和 **Gradio Web 界面**。
 
 ---
 
-## 🚀 Getting Started
+## 📂 项目结构
 
-### 🛠️ Environment Setup
-
-We utilize **Python 3.11** for all experiments. To install the necessary packages, simply run:
-
-```bash
-pip3 install -r requirements.txt
+```
+DeCo-Diff/
+├── train_DeCo_Diff.py          # 分布式训练脚本
+├── train_classifier.py          # 类别分类器训练
+├── evaluation_DeCo_Diff.py      # 单卡评估
+├── evaluation_DeCo_Diff_DDP.py  # 多卡评估
+├── inference_single.py          # 单张图片推理
+├── inference_auto.py            # 自动类别识别推理
+├── app_gradio_auto.py           # Gradio Web 界面
+├── models.py                    # 模型工厂
+└── ldm/modules/diffusionmodules/
+    └── openaimodel.py           # UNet + 门控机制
 ```
 
-### 📁 Datasets
+---
 
-You can download the datasets from the links below:
+## 🚀 快速开始
+
+### 环境安装
+
+```bash
+pip install -r requirements.txt
+pip install gradio  # Web 界面
+```
+
+### 数据集
+
 - [MVTec-AD](https://www.mvtec.com/company/research/datasets/mvtec-ad)
 - [VisA](https://amazon-visual-anomaly.s3.us-west-2.amazonaws.com/VisA_20220922.tar)
 
-
 ---
 
-## 🏋️ Training
+## 🏋️ 训练
 
-Train our model using the following command. This command sets up the RLR training with various options tailored to your dataset and desired augmentations:
+### 单卡训练
 
 ```bash
-torchrun train_DeCo_Diff.py \
-            --dataset mvtec \ #mvtec or visa
-            --data-dir /path/to/dataset \
-            --model-size UNet_L \
-            --object-category all  \
-            --image-size 288 \
-            --center-size 256 \
-            --center-crop True
+torchrun --nnodes=1 --nproc_per_node=1 train_DeCo_Diff.py \
+    --dataset mvtec \
+    --data-dir ./mvtec-dataset \
+    --object-category all \
+    --model-size UNet_L \
+    --epochs 800
 ```
+
+### 多卡训练
+
+```bash
+torchrun --nnodes=1 --nproc_per_node=4 train_DeCo_Diff.py \
+    --dataset mvtec \
+    --data-dir ./mvtec-dataset \
+    --object-category all \
+    --global-batch-size 256
+```
+
+### 断点续训
+
+```bash
+torchrun train_DeCo_Diff.py --resume ./checkpoints/last.pt
+```
+
+### 主要参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--dataset` | mvtec | 数据集 (mvtec/visa) |
+| `--object-category` | all | 类别 (all 或特定类别) |
+| `--model-size` | UNet_L | 模型大小 (XS/S/M/L/XL) |
+| `--epochs` | 800 | 训练轮数 |
+| `--lr` | 1e-4 | 学习率 |
+| `--center-size` | 256 | 裁剪尺寸 |
+| `--resume` | - | 断点续训路径 |
 
 ---
 
-## 🧪 Testing
+## 🧪 评估
 
-Once the model is trained, test its performance using the command below:
+### 单卡评估
 
 ```bash
 python evaluation_DeCo_Diff.py \
-            --dataset mvtec \ #mvtec or visa
-            --data-dir /path/to/dataset \
-            --model-size UNet_L \ #trained model size
-            --object-category all  \
-            --anomaly-class all  \
-            --image-size 288 \
-            --center-size 256 \
-            --center-crop True \
-            --model-path /path/to/pretrained_weights.pt
+    --dataset mvtec \
+    --data-dir ./mvtec-dataset \
+    --model-path ./checkpoints/epoch-660.pt \
+    --object-category all
 ```
----
 
-## 📦 Pretrained Weights
+### 多卡评估
 
-For convenience, we provide pretrained weights for DeCo-Diff (UNet_L). These weights can be used for rapid inference and further experimentation:
-
-- **MVTec-AD Pretrained Weights:**  
-  Download from [Google Drive](https://drive.google.com/file/d/1ZuPD9x_HYyylY2DlCtl0PRi5UZyn0XAL/view?usp=share_link) 
-  
-- **VisA Pretrained Weights:**  
-  Download from [Google Drive](https://drive.google.com/file/d/1bZvzIyuEMWxIo8ZByP9us--OhTTPXYiA/view?usp=sharing) 
-
-
-Also, using pretrained model with imagenet could slightly boost the performance and robustness. You could download provided pretrained model provided by [LDM repository](https://github.com/CompVis/latent-diffusion?tab=readme-ov-file) from [here!](https://ommer-lab.com/files/latent-diffusion/cin.zip). 
-To use the pretrained model, set `--from-scratch` to `False` and specify the path to the downloaded checkpoint using `--pretrained`.
-
----
-
-## 📊 Results
-
-Below are the performances of DeCo-Diff on the MVTec-AD and VisA datasets using the best trained models (provided weights). These results illustrate the high efficacy of DeCo-Diff in detecting anomalies in a multi-class UAD setting. Please note that these results differ slightly from those reported in the paper and are slightly better, as they were obtained using an optimized set of training parameters.
-
-
-|**Dataset**  |I-**AUROC**| I-**AP** |I-**f1max**|P-**AUROC**| P-**AP** |P-**f1max**|P-**AUPRO**|
-|-------------|-----------|----------|-----------|-----------|--------|-----------|-----------|
-| MVTec-AD   |    99.2    |   99.7   |   98.7    |   98.8    |  76.8  |   71.1    |   95.1    |
-| VisA       |    96.2    |   97.0   |   92.6    |   98.3    |  57.5  |   56.4    |   91.5    |
-
----
-
-## 📸 Sample Results
-
-Below are some sample outputs showcasing the performance of DeCo-Diff on real data:
-
-![DeCo-Diff Samples](./assets/Samples.png)
-
----
-
-## 📚 Citation & Reference
-
-If you find DeCo-Diff useful in your research, please cite our work:
-
-```bibtex
-@inproceedings{beizaee2025correcting,
-  title={Correcting deviations from normality: A reformulated diffusion model for multi-class unsupervised anomaly detection},
-  author={Beizaee, Farzad and Lodygensky, Gregory A and Desrosiers, Christian and Dolz, Jose},
-  booktitle={Proceedings of the Computer Vision and Pattern Recognition Conference},
-  pages={19088--19097},
-  year={2025}
-}
+```bash
+torchrun --nnodes=1 --nproc_per_node=4 evaluation_DeCo_Diff_DDP.py \
+    --dataset mvtec \
+    --data-dir ./mvtec-dataset \
+    --model-path ./checkpoints/epoch-660.pt \
+    --object-category all
 ```
+
+---
+
+## �️ Web 界面
+
+### 训练分类器（首次使用）
+
+```bash
+python train_classifier.py --data-dir ./mvtec-dataset --epochs 30
+```
+
+### 启动 Gradio
+
+```bash
+python app_gradio_auto.py \
+    --model-path ./checkpoints/epoch-660.pt \
+    --classifier-path ./classifier_mvtec.pth
+
+# 公网访问
+python app_gradio_auto.py \
+    --model-path ./checkpoints/epoch-660.pt \
+    --classifier-path ./classifier_mvtec.pth \
+    --share
+```
+
+### 功能特性
+
+- 🔍 **自动类别识别** - 无需手动选择类别
+- ⚡ **实时检测** - 上传图片即可检测
+- 📊 **可视化结果** - 重建图像、异常热力图、区域标注
+- 🔧 **参数可调** - 阈值、门控融合等
+
+---
+
+## 📝 单张推理
+
+```bash
+# 基本用法
+python inference_single.py \
+    --image ./test.jpg \
+    --model-path ./checkpoints/epoch-660.pt \
+    --class-id 0 \
+    --threshold 0.3
+
+# 使用门控融合
+python inference_single.py \
+    --image ./test.jpg \
+    --model-path ./checkpoints/epoch-660.pt \
+    --class-id 0 \
+    --use-gate-fusion true
+```
+
+### 自动类别识别推理
+
+```bash
+python inference_auto.py \
+    --image ./test.jpg \
+    --model-path ./checkpoints/epoch-660.pt \
+    --classifier-path ./classifier_mvtec.pth
+```
+
+---
+
+## 🔧 门控机制
+
+本分支在原始 DeCo-Diff 基础上添加了门控机制：
+
+- **DoD-Gating**: 在 UNet 输出层添加门控，自适应调节偏差预测强度
+- **Skip-Gating**: 对 skip connection 添加门控，控制特征传递
+
+详细文档请参阅 [GATING_README.md](./GATING_README.md)
+
+---
+
+## 📄 许可证
+
+MIT License

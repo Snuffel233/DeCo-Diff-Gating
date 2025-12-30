@@ -208,35 +208,16 @@ def create_results_figure(processed_img, reconstructed, image_diff, latent_diff,
     return result
 
 
-def create_classification_plot(top3_results, predicted_class):
-    """Create classification bar chart"""
-    fig, ax = plt.subplots(figsize=(5, 3), facecolor='white')
-    fig.patch.set_facecolor('white')
-    
-    classes = [r[0] for r in top3_results]
-    probs = [r[1] * 100 for r in top3_results]
-    colors = ['#4CAF50' if c == predicted_class else '#64B5F6' for c in classes]
-    
-    bars = ax.barh(classes, probs, color=colors, edgecolor='white', height=0.6)
-    ax.set_xlabel('Confidence (%)', fontweight='bold')
-    ax.set_title('Category Prediction (Top-3)', fontweight='bold', pad=10)
-    ax.set_xlim(0, 105)
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    
-    for bar, prob in zip(bars, probs):
-        ax.text(bar.get_width() + 1, bar.get_y() + bar.get_height()/2, 
-                f'{prob:.1f}%', va='center', fontweight='bold')
-    
-    plt.tight_layout()
-    
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=120, bbox_inches='tight', facecolor='white')
-    buf.seek(0)
-    result = np.array(Image.open(buf))
-    plt.close()
-    
-    return result
+def create_classification_text(class_name, confidence, top3_results):
+    """创建分类结果文本"""
+    text = f"### 🏷️ 识别类别: **{class_name}**\n"
+    text += f"### 📊 置信度: **{confidence:.1%}**\n\n"
+    text += "| 排名 | 类别 | 置信度 |\n"
+    text += "|------|------|--------|\n"
+    for i, (cls, prob) in enumerate(top3_results):
+        marker = "✓" if cls == class_name else ""
+        text += f"| {i+1} | {cls} {marker} | {prob:.1%} |\n"
+    return text
 
 
 def run_inference(image, threshold, use_gate_fusion, center_size, reverse_steps):
@@ -257,7 +238,7 @@ def run_inference(image, threshold, use_gate_fusion, center_size, reverse_steps)
             original_image = image
         
         class_id, class_name, confidence, top3_results = classify_image(original_image, center_size)
-        classification_plot = create_classification_plot(top3_results, class_name)
+        classification_text = create_classification_text(class_name, confidence, top3_results)
         
         # Stage 2: Preprocessing (consistent with inference_single.py)
         # First resize to image_size (288), then center crop to center_size (256)
@@ -345,79 +326,79 @@ def run_inference(image, threshold, use_gate_fusion, center_size, reverse_steps)
             anomaly_map, threshold, class_name, confidence, anomaly_score
         )
         
-        # Result report
-        status = "🔴 ANOMALY DETECTED" if is_anomalous else "🟢 NORMAL"
+        # Result report (Chinese)
+        status = "🔴 检测到异常" if is_anomalous else "🟢 正常"
         result_text = f"""
-## Detection Result: {status}
+## 检测结果: {status}
 
-| Metric | Value |
-|--------|-------|
-| **Predicted Class** | {class_name} |
-| **Class Confidence** | {confidence:.2%} |
-| **Anomaly Score** | {anomaly_score:.4f} |
-| **Threshold** | {threshold} |
-| **Gate Fusion** | {'Yes' if use_gate_fusion else 'No'} |
+| 指标 | 值 |
+|------|------|
+| **识别类别** | {class_name} |
+| **类别置信度** | {confidence:.2%} |
+| **异常分数** | {anomaly_score:.4f} |
+| **判断阈值** | {threshold} |
+| **门控融合** | {'是' if use_gate_fusion else '否'} |
 
-{'⚠️ **Anomaly detected!** Please check the highlighted regions.' if is_anomalous else '✅ **Image is normal.** No anomalies detected.'}
+{'⚠️ **检测到异常！** 请检查标红区域。' if is_anomalous else '✅ **图像正常**，未检测到异常。'}
 """
         
-        return classification_plot, results_figure, result_text
+        return classification_text, results_figure, result_text
     
     except Exception as e:
         import traceback
-        return None, None, f"❌ Error: {str(e)}\n{traceback.format_exc()}"
+        return "", None, f"❌ 错误: {str(e)}\n{traceback.format_exc()}"
 
 
 def create_app(args):
-    """Create Gradio application"""
+    """创建 Gradio 应用"""
     
-    with gr.Blocks(title="DeCo-Diff Anomaly Detection", theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(title="DeCo-Diff 异常检测", theme=gr.themes.Soft()) as demo:
         gr.Markdown("""
-        # 🔬 DeCo-Diff Automatic Anomaly Detection System
-        Automatic category recognition and anomaly detection with visualization of each processing stage.
+        # 🔬 DeCo-Diff-Gating 自动异常检测系统
+        自动识别图像类别并进行异常检测，可视化展示检测结果。
         """)
         
         with gr.Row():
-            # ========== Left Column: Input & Config ==========
+            # ========== 左侧：输入和配置 ==========
             with gr.Column(scale=1):
-                gr.Markdown("### 📷 Input")
-                image_input = gr.Image(label="Upload Image", type="numpy", height=300)
+                gr.Markdown("### 📷 图像上传")
+                image_input = gr.Image(label="上传图片", type="numpy", height=300)
                 
-                gr.Markdown("### ⚙️ Parameters")
-                threshold = gr.Slider(0.1, 0.8, value=0.30, step=0.05, label="Anomaly Threshold")
-                use_gate = gr.Checkbox(label="Use Gate Fusion", value=False)
+                gr.Markdown("### ⚙️ 参数设置")
+                threshold = gr.Slider(0.1, 0.8, value=0.30, step=0.05, label="异常阈值（越高越不易误报）")
+                use_gate = gr.Checkbox(label="使用门控融合", value=False)
                 
-                run_btn = gr.Button("🚀 Run Detection", variant="primary", size="lg")
+                run_btn = gr.Button("🚀 开始检测", variant="primary", size="lg")
                 
-                with gr.Accordion("🔧 Model Configuration", open=False):
-                    model_path = gr.Textbox(label="DeCo-Diff Model Path", value=args.model_path)
-                    classifier_path = gr.Textbox(label="Classifier Path", value=args.classifier_path)
+                with gr.Accordion("🔧 模型配置", open=False):
+                    model_path = gr.Textbox(label="DeCo-Diff 模型路径", value=args.model_path)
+                    classifier_path = gr.Textbox(label="分类器路径", value=args.classifier_path)
                     
                     with gr.Row():
                         model_size = gr.Dropdown(
                             choices=['UNet_XS', 'UNet_S', 'UNet_M', 'UNet_L', 'UNet_XL'],
-                            value=args.model_size, label="Model Size"
+                            value=args.model_size, label="模型大小"
                         )
-                        vae_type = gr.Dropdown(choices=['ema', 'mse'], value='ema', label="VAE Type")
+                        vae_type = gr.Dropdown(choices=['ema', 'mse'], value='ema', label="VAE 类型")
                     
                     with gr.Row():
-                        center_size = gr.Slider(128, 512, value=256, step=32, label="Image Size")
-                        reverse_steps = gr.Slider(1, 10, value=5, step=1, label="Reverse Steps")
+                        center_size = gr.Slider(128, 512, value=256, step=32, label="图像尺寸")
+                        reverse_steps = gr.Slider(1, 10, value=5, step=1, label="反向步数")
                     
-                    load_btn = gr.Button("🔄 Load Models", variant="secondary")
-                    load_status = gr.Textbox(label="Status", interactive=False, lines=3)
+                    load_btn = gr.Button("🔄 加载模型", variant="secondary")
+                    load_status = gr.Textbox(label="状态", interactive=False, lines=3)
             
-            # ========== Right Column: Results ==========
+            # ========== 右侧：结果展示 ==========
             with gr.Column(scale=2):
-                gr.Markdown("### 📊 Classification Result")
-                classification_output = gr.Image(label="Category Prediction", height=200)
+                gr.Markdown("### 🏷️ 类别识别结果")
+                classification_output = gr.Markdown()
                 
-                gr.Markdown("### 🔍 Detection Results")
-                results_output = gr.Image(label="Analysis Results")
+                gr.Markdown("### 🔍 检测结果可视化")
+                results_output = gr.Image(label="分析结果")
                 
-                result_report = gr.Markdown(label="Report")
+                result_report = gr.Markdown(label="检测报告")
         
-        # ========== Event Bindings ==========
+        # ========== 事件绑定 ==========
         load_btn.click(
             load_models,
             inputs=[model_path, classifier_path, model_size, vae_type, center_size, reverse_steps],
