@@ -148,7 +148,8 @@ def calculate_metrics(ground_truth, prediction):
     auroc_score = auroc(torch.from_numpy(flat_pred), torch.from_numpy(flat_gt.astype(int)))
 
     f1max = metrics.F1Max()
-    f1_max_score = f1max(torch.from_numpy(flat_pred), torch.from_numpy(flat_gt.astype(int)))
+    # 加上 .cuda() 强制把数据搬到显卡上
+    f1_max_score = f1max(torch.from_numpy(flat_pred).cuda(), torch.from_numpy(flat_gt.astype(int)).cuda())
     
     ap = average_precision_score(ground_truth.flatten(), prediction.flatten())
     
@@ -255,8 +256,8 @@ def evaluation_ddp(args):
 
     latent_size = int(args.center_size) // 8
     model = UNET_models[args.model_size](latent_size=latent_size, ncls=args.num_classes)
-    
-    state_dict = torch.load(ckpt, map_location='cpu')['model']
+    # 修改后：显式告诉 PyTorch "我知道里面有杂项，别拦我"
+    state_dict = torch.load(ckpt, map_location='cpu', weights_only=False)['model']
     if rank == 0:
         print(model.load_state_dict(state_dict, strict=False))
     else:

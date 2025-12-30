@@ -159,31 +159,37 @@ def main(args):
     assert args.center_size % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
     latent_size = args.actual_image_size // 8
     model = UNET_models[args.model_size](latent_size=latent_size, ncls=args.num_classes)
-        
-
-    if not args.from_scratch:
+    
+    # 用于断点续训的变量
+    start_epoch = 1
+    
+    # 从 checkpoint 恢复训练
+    if args.resume:
+        if os.path.isfile(args.resume):
+            logger.info(f"Loading checkpoint from {args.resume}")
+            checkpoint = torch.load(args.resume, map_location='cpu')
+            model.load_state_dict(checkpoint['model'])
+            start_epoch = checkpoint.get('epoch', 0) + 1
+            logger.info(f"Resuming from epoch {start_epoch}")
+        else:
+            logger.warning(f"Checkpoint file not found: {args.resume}, training from scratch")
+    elif not args.from_scratch:
         dictss = {}
         try:
             state_dict = torch.load(args.pretrained)['state_dict']
             for key in state_dict.keys():
                 if key.startswith('model.diffusion_model'):
-
                     dictss[key.replace('model.diffusion_model.', '')] = state_dict[key] 
-
             dictss['cond_stage_model.embedding.weight'] = state_dict['cond_stage_model.embedding.weight'][:args.num_classes,:] 
-
-            logger.info(model.load_state_dict(dictss))
-            
-            logger.info('Stable diiffusion weights loaded!')
+            logger.info(model.load_state_dict(dictss, strict=False))
+            logger.info('Stable diffusion weights loaded!')
         except:
             try:
                 state_dict = torch.load(args.pretrained)['model']
-                model.load_state_dict(state_dict)
+                model.load_state_dict(state_dict, strict=False)
                 logger.info('pretrained weights loaded!')
             except:
                 logger.info('provided pretrained model could not be loaded! Training from scratch')
-                
-        
 
     model = DDP(model.to(device), device_ids=[rank])
     diffusion = create_diffusion(timestep_respacing="ddim10", predict_deviation=True, predict_xstart=False, sigma_small=False, diffusion_steps=10)
@@ -228,13 +234,23 @@ def main(args):
     logger.info(f"Dataset contains {len(dataset):,} training images")
 
 
-    # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
+    # Setup optimizer
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = get_cosine_schedule_with_warmup(
         opt,
         num_warmup_steps=args.warmup_epochs,
         num_training_steps=args.epochs*1.5,
     )
+    
+    # 从 checkpoint 恢复 optimizer 和 scheduler 状态
+    if args.resume and os.path.isfile(args.resume):
+        checkpoint = torch.load(args.resume, map_location='cpu')
+        if 'opt' in checkpoint:
+            opt.load_state_dict(checkpoint['opt'])
+            logger.info('Optimizer state restored')
+        if 'scheduler' in checkpoint:
+            scheduler.load_state_dict(checkpoint['scheduler'])
+            logger.info('Scheduler state restored')
 
     model.train()  # important! This enables embedding dropout for classifier-free guidance
 
@@ -245,9 +261,9 @@ def main(args):
     running_mse = 0
     start_time = time()
 
-    logger.info(f"Training for {args.epochs} epochs...")
+    logger.info(f"Training for {args.epochs} epochs (starting from epoch {start_epoch})...")
     
-    for epoch in range(1, args.epochs+1):
+    for epoch in range(start_epoch, args.epochs+1):
         # 设置 sampler 的 epoch 以确保每个 epoch 数据 shuffle 不同
         sampler.set_epoch(epoch)
         logger.info(f"Beginning epoch {epoch}...")
@@ -323,19 +339,21 @@ def main(args):
                 start_time = time()
 
         scheduler.step()
-        if epoch % args.ckpt_every == 0 and epoch>0:
+        if epoch % args.ckpt_every == 0 and epoch > 0:
             if rank == 0: 
-                # Save checkpoint:
+                # Save checkpoint with full training state
                 checkpoint = {
                     "model": model.module.state_dict(),
-                    # "opt": opt.state_dict(),
+                    "opt": opt.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "epoch": epoch,
                     "args": args
                 }
                 checkpoint_path = f"{checkpoint_dir}/epoch-{epoch}.pt"
                 torch.save(checkpoint, checkpoint_path)
                 last_checkpoint_path = f"{checkpoint_dir}/last.pt"
                 torch.save(checkpoint, last_checkpoint_path)
-                logger.info(f"Saved checkpoint to {checkpoint_dir}")
+                logger.info(f"Saved checkpoint to {checkpoint_path}")
 
             dist.barrier()
             
@@ -370,6 +388,7 @@ if __name__ == "__main__":
     parser.add_argument("--augmentation", type=lambda v: True if v.lower() in ('yes','true','t','y','1') else False, default=True)
     parser.add_argument("--accumulation-steps", type=int, default=2)
     parser.add_argument("--pretrained", type=str, default='.')
+    parser.add_argument("--resume", type=str, default='', help="从指定的 checkpoint 恢复训练，例如: ./checkpoints/last.pt")
     
     args = parser.parse_args()
     if args.dataset == 'mvtec':
